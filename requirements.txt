@@ -2,6 +2,6 @@ flask
 flask-socketio
 simple-websocket
 flask-sqlalchemy
-psycopg2-binary
+psycopg[binary]>=3.2
 cryptography
 gunicorn
