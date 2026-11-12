@@ -291,13 +291,41 @@ def set_members(rid, ids):
         db.session.add(Member(room_id=rid, user_id=uid))
 
 
-def post(rid, user, text, fileinfo):
+def quote_of(rid, mid):
+    row = db.session.get(ChatMessage, mid) if mid else None
+    if not row or row.room_id != rid:
+        return None
+    try:
+        m = json.loads(decrypt(row.blob))
+    except Exception:
+        return None
+    f = m.get("f")
+    if m.get("t"):
+        snippet = m["t"][:80]
+    elif f:
+        mt = f.get("m", "")
+        if mt.startswith("audio/"):
+            snippet = "🎤 رسالة صوتية"
+        elif mt.startswith("image/"):
+            snippet = "🖼️ صورة"
+        else:
+            snippet = "📎 " + str(f.get("n", "ملف"))
+    else:
+        snippet = ""
+    return {"id": row.id, "u": m.get("u", "?"), "t": snippet}
+
+
+def post(rid, user, text, fileinfo, reply_id=None):
     msg = {"u": user.username, "t": text, "ts": int(time.time())}
     if fileinfo:
         msg["f"] = fileinfo
-    db.session.add(ChatMessage(room_id=rid, blob=encrypt(json.dumps(msg, ensure_ascii=False))))
+    quote = quote_of(rid, reply_id)
+    if quote:
+        msg["re"] = quote
+    row = ChatMessage(room_id=rid, blob=encrypt(json.dumps(msg, ensure_ascii=False)))
+    db.session.add(row)
     db.session.commit()
-    emit_to_room(rid, "message", dict(msg, room=rid))
+    emit_to_room(rid, "message", dict(msg, room=rid, id=row.id))
 
 
 # ---------------------------------------------------------------
@@ -307,24 +335,29 @@ HEAD = """<!DOCTYPE html>
 <html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>دردشة</title>
+<script>
+(function(){try{var t=localStorage.getItem("theme")||"auto";var d=t==="dark"||(t==="auto"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.setAttribute("data-dark",d?"1":"0");}catch(e){}})();
+</script>
 <style>
+:root{--bg:#ece5dd;--card:#fff;--text:#111;--muted:#555;--head:#075e54;--in:#fff;--out:#dcf8c6;--bar:#f0f0f0;--line:#e3e3e3;--field:#fff;--link:#0b57d0;--accent:#075e54;--sub:#f7f7f7}
+html[data-dark="1"]{--bg:#0b141a;--card:#1f2c33;--text:#e9edef;--muted:#8696a0;--head:#1f2c33;--in:#202c33;--out:#005c4b;--bar:#1f2c33;--line:#2a3942;--field:#2a3942;--link:#53bdeb;--accent:#00a884;--sub:#111b21;color-scheme:dark}
 *{box-sizing:border-box}
-body{margin:0;font-family:system-ui,sans-serif;background:#ece5dd}
-header{background:#075e54;color:#fff;padding:12px 14px;display:flex;justify-content:space-between;align-items:center;font-weight:bold}
+body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--text)}
+header{background:var(--head);color:#fff;padding:12px 14px;display:flex;justify-content:space-between;align-items:center;font-weight:bold}
 header a{color:#fff;text-decoration:none;margin-inline-start:12px;font-weight:normal}
-.card{max-width:420px;margin:40px auto;background:#fff;padding:24px;border-radius:14px}
+.card{max-width:420px;margin:40px auto;background:var(--card);padding:24px;border-radius:14px}
 .wrap{max-width:900px;margin:14px auto;padding:0 10px}
-.box{background:#fff;padding:14px;border-radius:12px;margin-bottom:14px}
-input{width:100%;padding:12px;margin:6px 0;border:1px solid #ccc;border-radius:10px;font-size:16px}
+.box{background:var(--card);padding:14px;border-radius:12px;margin-bottom:14px}
+input{width:100%;padding:12px;margin:6px 0;border:1px solid var(--line);border-radius:10px;font-size:16px;background:var(--field);color:var(--text)}
 input[type=checkbox]{width:auto;margin:0 6px}
 .chk{display:block;padding:4px 0}
-button{padding:10px 18px;border:none;border-radius:10px;background:#075e54;color:#fff;font-size:16px}
+button{padding:10px 18px;border:none;border-radius:10px;background:var(--accent);color:#fff;font-size:16px}
 button.del{background:#c0392b;padding:6px 12px;font-size:14px}
-.err{color:#c0392b}.ok{color:#1e8449}
+.err{color:#e74c3c}.ok{color:#27ae60}
 table{width:100%;border-collapse:collapse;font-size:14px}
-td,th{padding:6px;border-bottom:1px solid #eee;text-align:right;white-space:nowrap}
+td,th{padding:6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
 .scroll{overflow-x:auto}
-details{border-top:1px solid #eee;padding:8px 0}
+details{border-top:1px solid var(--line);padding:8px 0}
 summary{font-weight:bold;cursor:pointer}
 </style></head><body>"""
 
@@ -343,32 +376,49 @@ CHAT = HEAD + r"""
 <style>
 body{display:flex;flex-direction:column;height:100dvh;overflow:hidden}
 .ic{background:transparent;padding:0 8px;font-size:20px;color:inherit}
-#sub{background:#f7f7f7;font-size:12px;color:#555;padding:4px 12px;min-height:24px}
-#typing{color:#075e54;font-weight:bold}
+#sub{background:var(--sub);font-size:12px;color:var(--muted);padding:4px 12px;min-height:24px}
+#typing{color:var(--accent);font-weight:bold}
 #messages{flex:1;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:6px}
-.msg{max-width:82%;padding:8px 12px;border-radius:12px;background:#fff;word-wrap:break-word}
-.msg.me{align-self:flex-start;background:#dcf8c6}
-.msg .name{font-size:12px;color:#075e54;font-weight:bold;display:block}
-.msg .time{font-size:10px;color:#888;display:block;text-align:left}
+.msg{max-width:82%;padding:8px 12px;border-radius:12px;background:var(--in);color:var(--text);word-wrap:break-word;box-shadow:0 1px 1px rgba(0,0,0,.15)}
+.msg.me{align-self:flex-start;background:var(--out)}
+.msg.flash{outline:2px solid var(--accent)}
+.msg .name{font-size:12px;color:var(--accent);font-weight:bold;display:block}
+.msg .time{font-size:10px;color:var(--muted);display:block;text-align:left}
 .msg img{max-width:100%;border-radius:8px;display:block;margin:4px 0}
-.msg a{color:#0b57d0}
+.msg a{color:var(--link)}
 .msg audio{width:230px;max-width:100%;display:block;margin:4px 0}
-#rec{display:none;gap:8px;padding:10px;background:#f0f0f0;align-items:center;justify-content:space-between}
-#rt{color:#c0392b;font-weight:bold}
-.recording #form{display:none}
-.recording #rec{display:flex}
-#form{display:flex;gap:6px;padding:8px;background:#f0f0f0;align-items:center}
+.quote{border-inline-start:3px solid var(--accent);background:rgba(127,127,127,.18);border-radius:6px;padding:4px 8px;margin-bottom:4px;font-size:13px;cursor:pointer}
+.quote b{display:block;font-size:12px;color:var(--accent)}
+.quote span{color:var(--muted)}
+#replybar{display:none;align-items:center;justify-content:space-between;gap:8px;background:var(--bar);padding:6px 12px;border-top:1px solid var(--line);font-size:13px}
+#replybar.on{display:flex}
+#rbtext{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+#form{display:flex;gap:6px;padding:8px;background:var(--bar);align-items:center}
 #form #text{flex:1;border-radius:20px;border:none;margin:0}
 #form #send{border-radius:20px}
-#clip{color:#075e54}
+#clip,#mic{color:var(--accent)}
+#rec{display:none;gap:8px;padding:10px;background:var(--bar);align-items:center;justify-content:space-between}
+#rt{color:#e74c3c;font-weight:bold}
+.recording #form{display:none}
+.recording #rec{display:flex}
 #back{position:fixed;inset:0;background:rgba(0,0,0,.4);display:none;z-index:10}
 #back.open{display:block}
-#drawer{position:fixed;top:0;bottom:0;right:0;width:78%;max-width:320px;background:#fff;transform:translateX(100%);transition:transform .2s;z-index:20;overflow-y:auto;padding:12px}
+#drawer{position:fixed;top:0;bottom:0;right:0;width:78%;max-width:320px;background:var(--card);color:var(--text);transform:translateX(100%);transition:transform .2s;z-index:20;overflow-y:auto;padding:12px}
 #drawer.open{transform:translateX(0)}
-#drawer h4{margin:12px 0 6px;color:#075e54}
+#drawer h4{margin:14px 0 6px;color:var(--accent)}
 .item{padding:10px;border-radius:8px;cursor:pointer;display:flex;justify-content:space-between}
-.item.on{background:#dcf8c6}
+.item.on{background:rgba(127,127,127,.22)}
 .badge{background:#c0392b;color:#fff;border-radius:10px;padding:0 7px;font-size:12px}
+.row{display:flex;gap:6px;flex-wrap:wrap}
+.row button{padding:8px 10px;font-size:14px;background:var(--bar);color:var(--text)}
+.row button.on{background:var(--accent);color:#fff}
+.sw{width:44px;height:44px;border-radius:10px;border:2px solid var(--line);cursor:pointer}
+.sw.on{border-color:var(--accent)}
+#sheetback{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;z-index:30}
+#sheetback.open{display:flex;align-items:flex-end;justify-content:center}
+#sheet{width:100%;max-width:480px;background:var(--card);border-radius:16px 16px 0 0;padding:10px}
+#sheet button{display:block;width:100%;margin:6px 0;background:var(--bar);color:var(--text)}
+#sheet button.danger{background:#c0392b;color:#fff}
 </style>
 <header>
 <span><button id="menu" class="ic">☰</button><b id="title">...</b></span>
@@ -376,6 +426,7 @@ body{display:flex;flex-direction:column;height:100dvh;overflow:hidden}
 </header>
 <div id="sub"><span id="cnt"></span> <span id="typing"></span></div>
 <div id="messages"></div>
+<div id="replybar"><div id="rbtext"></div><button type="button" id="rbx" class="ic">✖</button></div>
 <form id="form">
 <button type="button" id="clip" class="ic">📎</button>
 <input type="file" id="file" hidden>
@@ -385,12 +436,24 @@ body{display:flex;flex-direction:column;height:100dvh;overflow:hidden}
 </form>
 <div id="rec"><button type="button" id="rcancel" class="del">✖ إلغاء</button><span id="rt">⏺ 0:00</span><button type="button" id="rsend">إرسال ➤</button></div>
 <div id="back"></div>
-<aside id="drawer"><h4>المجموعات</h4><div id="groups"></div><h4>الأشخاص (رسالة خاصة)</h4><div id="people"></div></aside>
+<aside id="drawer">
+<h4>المجموعات</h4><div id="groups"></div>
+<h4>الأشخاص (رسالة خاصة)</h4><div id="people"></div>
+<h4>المظهر</h4>
+<div class="row" id="themes"><button data-t="light">☀️ فاتح</button><button data-t="dark">🌙 داكن</button><button data-t="auto">🌓 تلقائي</button></div>
+<h4>خلفية المحادثة</h4>
+<div class="row" id="walls"></div>
+<div class="row" style="margin-top:8px"><button id="wallpick">🖼️ صورة من جوالك</button><button id="wallreset">إزالة</button></div>
+<input type="file" id="wallfile" accept="image/*" hidden>
+</aside>
+<div id="sheetback"><div id="sheet">
+<button id="sreply">↩️ رد</button><button id="scopy">📋 نسخ النص</button><button id="sdel" class="danger">🗑️ حذف الرسالة</button><button id="sclose">إغلاق</button>
+</div></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
 <script>
-const me = {{ username|tojson }}, myId = {{ uid }}, csrf = {{ csrf_token()|tojson }};
-let rooms = [], users = [], online = [], active = null, unread = {}, tTimer = null, lastTyping = 0;
+const me = {{ username|tojson }}, myId = {{ uid }}, csrf = {{ csrf_token()|tojson }}, isAdmin = {{ is_admin|tojson }};
+let rooms = [], users = [], online = [], active = null, unread = {}, tTimer = null, lastTyping = 0, replyTo = null, sheetMsg = null;
 const $ = id => document.getElementById(id);
 const box = $("messages");
 const socket = io();
@@ -424,15 +487,63 @@ function renderSide(){
 }
 
 function openRoom(id){
-  active = id; unread[id] = 0; box.innerHTML = ""; $("typing").textContent = "";
+  active = id; unread[id] = 0; box.innerHTML = ""; $("typing").textContent = ""; clearReply();
   socket.emit("open", {room: id});
   closeDrawer(); renderSide();
 }
 
+/* ---------- الرد والحذف ---------- */
+function snippetOf(m){
+  if (m.t) return m.t.slice(0, 60);
+  if (m.f) {
+    if (m.f.m.indexOf("audio/") === 0) return "🎤 رسالة صوتية";
+    if (m.f.m.indexOf("image/") === 0) return "🖼️ صورة";
+    return "📎 " + m.f.n;
+  }
+  return "";
+}
+function setReply(m){
+  replyTo = {id: m.id, u: m.u};
+  $("rbtext").textContent = "↩️ " + m.u + ": " + snippetOf(m);
+  $("replybar").classList.add("on"); $("text").focus();
+}
+function clearReply(){ replyTo = null; $("replybar").classList.remove("on"); }
+function jumpTo(id){
+  const el = box.querySelector('[data-id="' + id + '"]');
+  if (!el) return;
+  el.scrollIntoView({block: "center"}); el.classList.add("flash");
+  setTimeout(() => el.classList.remove("flash"), 1500);
+}
+function openSheet(m){
+  sheetMsg = m;
+  $("sdel").style.display = (isAdmin || m.u === me) ? "block" : "none";
+  $("scopy").style.display = m.t ? "block" : "none";
+  $("sheetback").classList.add("open");
+}
+function closeSheet(){ $("sheetback").classList.remove("open"); }
+$("sreply").onclick = () => { if (sheetMsg) setReply(sheetMsg); closeSheet(); };
+$("scopy").onclick = () => { try { navigator.clipboard.writeText(sheetMsg.t); } catch (e) {} closeSheet(); };
+$("sdel").onclick = () => {
+  if (sheetMsg && confirm("حذف الرسالة للجميع؟")) socket.emit("delete", {room: active, id: sheetMsg.id});
+  closeSheet();
+};
+$("sclose").onclick = closeSheet;
+$("sheetback").onclick = e => { if (e.target === $("sheetback")) closeSheet(); };
+$("rbx").onclick = clearReply;
+
 function add(m){
   const d = document.createElement("div");
   d.className = "msg" + (m.u === me ? " me" : "");
+  if (m.id) d.dataset.id = m.id;
   const n = document.createElement("span"); n.className = "name"; n.textContent = m.u; d.appendChild(n);
+  if (m.re) {
+    const q = document.createElement("div"); q.className = "quote";
+    const qn = document.createElement("b"); qn.textContent = m.re.u;
+    const qt = document.createElement("span"); qt.textContent = m.re.t;
+    q.appendChild(qn); q.appendChild(qt);
+    q.onclick = ev => { ev.stopPropagation(); jumpTo(m.re.id); };
+    d.appendChild(q);
+  }
   if (m.f && m.f.m.indexOf("audio/") === 0) {
     const au = document.createElement("audio");
     au.controls = true; au.preload = "metadata"; au.src = "/file/" + m.f.id;
@@ -450,9 +561,11 @@ function add(m){
   const t = document.createElement("span"); t.className = "time";
   t.textContent = new Date(m.ts * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
   d.appendChild(t);
+  d.onclick = ev => { if (m.id && !ev.target.closest("a,audio")) openSheet(m); };
   box.appendChild(d); box.scrollTop = box.scrollHeight;
 }
 
+/* ---------- الاتصال ---------- */
 socket.on("connect", () => { socket.emit("get_rooms"); if (active !== null) socket.emit("open", {room: active}); });
 socket.on("connect_error", () => { location.href = "/login"; });
 socket.on("refresh", () => socket.emit("get_rooms"));
@@ -474,6 +587,13 @@ socket.on("message", m => {
   if (m.room === active) add(m);
   else { unread[m.room] = (unread[m.room] || 0) + 1; renderSide(); }
 });
+socket.on("deleted", d => {
+  if (d.room === active) {
+    const el = box.querySelector('[data-id="' + d.id + '"]');
+    if (el) el.remove();
+  }
+  if (replyTo && replyTo.id === d.id) clearReply();
+});
 socket.on("typing", d => {
   if (d.room !== active) return;
   $("typing").textContent = d.u + " يكتب...";
@@ -483,7 +603,10 @@ socket.on("typing", d => {
 $("form").addEventListener("submit", e => {
   e.preventDefault();
   const i = $("text"), text = i.value.trim();
-  if (text && active !== null) socket.emit("send", {room: active, text: text});
+  if (text && active !== null) {
+    socket.emit("send", {room: active, text: text, reply: replyTo ? replyTo.id : null});
+    clearReply();
+  }
   i.value = "";
 });
 $("text").addEventListener("input", () => {
@@ -495,16 +618,18 @@ function openDrawer(){ $("drawer").classList.add("open"); $("back").classList.ad
 function closeDrawer(){ $("drawer").classList.remove("open"); $("back").classList.remove("open"); }
 $("menu").onclick = openDrawer; $("back").onclick = closeDrawer;
 
-function shrink(file){
+/* ---------- الصور والملفات ---------- */
+function shrink(file, max, q){
+  max = max || 1280; q = q || 0.8;
   return new Promise((res, rej) => {
     const img = new Image();
     img.onload = () => {
-      const s = Math.min(1, 1280 / Math.max(img.width, img.height));
+      const s = Math.min(1, max / Math.max(img.width, img.height));
       const c = document.createElement("canvas");
       c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
       c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
       URL.revokeObjectURL(img.src);
-      c.toBlob(b => b ? res(b) : rej(), "image/jpeg", 0.8);
+      c.toBlob(b => b ? res(b) : rej(), "image/jpeg", q);
     };
     img.onerror = rej; img.src = URL.createObjectURL(file);
   });
@@ -523,10 +648,13 @@ async function sendFile(blob, name){
   if (active === null) return;
   if (blob.size > 2.5 * 1024 * 1024) { alert("الملف كبير، الحد الأقصى 2.5 ميجا"); return; }
   const fd = new FormData(); fd.append("room", active); fd.append("file", blob, name);
+  if (replyTo) fd.append("reply", replyTo.id);
+  clearReply();
   const r = await fetch("/upload", {method: "POST", headers: {"X-CSRF": csrf}, body: fd});
   if (!r.ok) alert("فشل رفع الملف");
 }
 
+/* ---------- التسجيل الصوتي ---------- */
 let rec = null, chunks = [], rStart = 0, rTimer = null, rCancel = false, rStream = null;
 async function startRec(){
   if (active === null || rec) return;
@@ -561,6 +689,62 @@ function stopRec(cancel){
 $("mic").onclick = startRec;
 $("rcancel").onclick = () => stopRec(true);
 $("rsend").onclick = () => stopRec(false);
+
+/* ---------- الوضع الداكن والخلفية (تُحفظ على جهازك) ---------- */
+function applyTheme(){
+  let t = "auto";
+  try { t = localStorage.getItem("theme") || "auto"; } catch (e) {}
+  const dark = t === "dark" || (t === "auto" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.setAttribute("data-dark", dark ? "1" : "0");
+  document.querySelectorAll("#themes button").forEach(b => b.classList.toggle("on", b.dataset.t === t));
+}
+document.querySelectorAll("#themes button").forEach(b => {
+  b.onclick = () => { try { localStorage.setItem("theme", b.dataset.t); } catch (e) {} applyTheme(); };
+});
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
+applyTheme();
+
+const WALLS = {
+  none: "",
+  green: "linear-gradient(160deg,#d4fc79,#96e6a1)",
+  blue: "linear-gradient(160deg,#a1c4fd,#c2e9fb)",
+  pink: "linear-gradient(160deg,#fbc2eb,#a6c1ee)",
+  sunset: "linear-gradient(160deg,#ffecd2,#fcb69f)",
+  night: "linear-gradient(160deg,#0f2027,#2c5364)",
+  dots: "radial-gradient(rgba(127,127,127,.35) 1px, transparent 1px) 0 0 / 18px 18px, var(--bg)"
+};
+function getWall(){
+  try { return JSON.parse(localStorage.getItem("wall") || "null") || {k: "none"}; }
+  catch (e) { return {k: "none"}; }
+}
+function applyWall(){
+  const w = getWall();
+  box.style.background = (w.k === "img" && w.v) ? 'url("' + w.v + '") center / cover no-repeat' : (WALLS[w.k] || "");
+  document.querySelectorAll("#walls .sw").forEach(s => s.classList.toggle("on", s.dataset.k === w.k));
+}
+Object.keys(WALLS).forEach(k => {
+  const s = document.createElement("div");
+  s.className = "sw"; s.dataset.k = k; s.style.background = WALLS[k] || "var(--bg)";
+  s.onclick = () => { try { localStorage.setItem("wall", JSON.stringify({k: k})); } catch (e) {} applyWall(); };
+  $("walls").appendChild(s);
+});
+$("wallpick").onclick = () => $("wallfile").click();
+$("wallfile").addEventListener("change", async e => {
+  const f = e.target.files[0]; e.target.value = "";
+  if (!f) return;
+  try {
+    const b = await shrink(f, 1080, 0.7);
+    const rd = new FileReader();
+    rd.onload = () => {
+      try { localStorage.setItem("wall", JSON.stringify({k: "img", v: rd.result})); }
+      catch (er) { alert("تعذر حفظ الصورة"); }
+      applyWall();
+    };
+    rd.readAsDataURL(b);
+  } catch (er) { alert("تعذر قراءة الصورة"); }
+});
+$("wallreset").onclick = () => { try { localStorage.removeItem("wall"); } catch (e) {} applyWall(); };
+applyWall();
 </script></body></html>"""
 
 ADMIN = HEAD + """
@@ -676,7 +860,8 @@ def upload():
                      data=enc_bytes(raw))
     db.session.add(att)
     db.session.flush()
-    post(rid, user, "", {"id": att.id, "n": name, "m": mime})
+    post(rid, user, "", {"id": att.id, "n": name, "m": mime},
+         request.form.get("reply", type=int))
     return {"ok": True}
 
 
@@ -828,7 +1013,9 @@ def on_open(data):
     msgs = []
     for r in reversed(rows):
         try:
-            msgs.append(json.loads(decrypt(r.blob)))
+            m = json.loads(decrypt(r.blob))
+            m["id"] = r.id
+            msgs.append(m)
         except Exception:
             pass
     emit("history", {"room": rid, "msgs": msgs})
@@ -844,7 +1031,36 @@ def on_send(data):
     text = str((data or {}).get("text", "")).strip()[:1000]
     if not text or not is_member(rid, user.id):
         return
-    post(rid, user, text, None)
+    post(rid, user, text, None, to_int((data or {}).get("reply")))
+
+
+@socketio.on("delete")
+def on_delete(data):
+    user = current_user()
+    if not user:
+        disconnect()
+        return
+    rid = to_int((data or {}).get("room"))
+    mid = to_int((data or {}).get("id"))
+    if not mid or not is_member(rid, user.id):
+        return
+    row = db.session.get(ChatMessage, mid)
+    if not row or row.room_id != rid:
+        return
+    try:
+        m = json.loads(decrypt(row.blob))
+    except Exception:
+        m = {}
+    if not (user.is_admin or m.get("u") == user.username):
+        return
+    fid = to_int((m.get("f") or {}).get("id"))
+    if fid:
+        att = db.session.get(Attachment, fid)
+        if att and att.room_id == rid:
+            db.session.delete(att)
+    db.session.delete(row)
+    db.session.commit()
+    emit_to_room(rid, "deleted", {"room": rid, "id": mid})
 
 
 @socketio.on("typing")
