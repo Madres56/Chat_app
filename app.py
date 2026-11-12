@@ -383,6 +383,8 @@ body{display:flex;flex-direction:column;height:100dvh;overflow:hidden}
 .msg.me{align-self:flex-start;background:var(--out)}
 .msg.flash{outline:2px solid var(--accent)}
 .msg .name{font-size:12px;color:var(--accent);font-weight:bold;display:block}
+.msg .top{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.dots{background:transparent;color:var(--muted);padding:0 6px;font-size:22px;line-height:1;border-radius:6px}
 .msg .time{font-size:10px;color:var(--muted);display:block;text-align:left}
 .msg img{max-width:100%;border-radius:8px;display:block;margin:4px 0}
 .msg a{color:var(--link)}
@@ -447,13 +449,13 @@ body{display:flex;flex-direction:column;height:100dvh;overflow:hidden}
 <input type="file" id="wallfile" accept="image/*" hidden>
 </aside>
 <div id="sheetback"><div id="sheet">
-<button id="sreply">↩️ رد</button><button id="scopy">📋 نسخ النص</button><button id="sdel" class="danger">🗑️ حذف الرسالة</button><button id="sclose">إغلاق</button>
+<button id="sreply">↩️ رد</button><button id="scopy">📋 نسخ النص</button><button id="sedit">✏️ تعديل</button><button id="sdel" class="danger">🗑️ حذف الرسالة</button><button id="sclose">إغلاق</button>
 </div></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
 <script>
 const me = {{ username|tojson }}, myId = {{ uid }}, csrf = {{ csrf_token()|tojson }}, isAdmin = {{ is_admin|tojson }};
-let rooms = [], users = [], online = [], active = null, unread = {}, tTimer = null, lastTyping = 0, replyTo = null, sheetMsg = null;
+let rooms = [], users = [], online = [], active = null, unread = {}, tTimer = null, lastTyping = 0, replyTo = null, sheetMsg = null, editing = null;
 const $ = id => document.getElementById(id);
 const box = $("messages");
 const socket = io();
@@ -503,11 +505,21 @@ function snippetOf(m){
   return "";
 }
 function setReply(m){
+  clearReply();
   replyTo = {id: m.id, u: m.u};
   $("rbtext").textContent = "↩️ " + m.u + ": " + snippetOf(m);
   $("replybar").classList.add("on"); $("text").focus();
 }
-function clearReply(){ replyTo = null; $("replybar").classList.remove("on"); }
+function clearReply(){
+  if (editing) $("text").value = "";
+  editing = null; replyTo = null; $("replybar").classList.remove("on");
+}
+function setEdit(m){
+  clearReply(); editing = m.id;
+  $("rbtext").textContent = "✏️ تعديل الرسالة";
+  $("replybar").classList.add("on");
+  $("text").value = m.t; $("text").focus();
+}
 function jumpTo(id){
   const el = box.querySelector('[data-id="' + id + '"]');
   if (!el) return;
@@ -518,6 +530,7 @@ function openSheet(m){
   sheetMsg = m;
   $("sdel").style.display = (isAdmin || m.u === me) ? "block" : "none";
   $("scopy").style.display = m.t ? "block" : "none";
+  $("sedit").style.display = (m.u === me && m.t) ? "block" : "none";
   $("sheetback").classList.add("open");
 }
 function closeSheet(){ $("sheetback").classList.remove("open"); }
@@ -528,14 +541,22 @@ $("sdel").onclick = () => {
   closeSheet();
 };
 $("sclose").onclick = closeSheet;
+$("sedit").onclick = () => { if (sheetMsg) setEdit(sheetMsg); closeSheet(); };
 $("sheetback").onclick = e => { if (e.target === $("sheetback")) closeSheet(); };
 $("rbx").onclick = clearReply;
 
+function timeText(m){
+  return new Date(m.ts * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}) + (m.ed ? " · معدّلة" : "");
+}
 function add(m){
   const d = document.createElement("div");
   d.className = "msg" + (m.u === me ? " me" : "");
   if (m.id) d.dataset.id = m.id;
-  const n = document.createElement("span"); n.className = "name"; n.textContent = m.u; d.appendChild(n);
+  const top = document.createElement("div"); top.className = "top";
+  const n = document.createElement("span"); n.className = "name"; n.textContent = m.u; top.appendChild(n);
+  const dots = document.createElement("button"); dots.type = "button"; dots.className = "dots"; dots.textContent = "⋮";
+  dots.onclick = ev => { ev.stopPropagation(); if (d._m.id) openSheet(d._m); };
+  top.appendChild(dots); d.appendChild(top); d._m = m;
   if (m.re) {
     const q = document.createElement("div"); q.className = "quote";
     const qn = document.createElement("b"); qn.textContent = m.re.u;
@@ -557,11 +578,10 @@ function add(m){
     } else { a.textContent = "📎 " + m.f.n; a.download = m.f.n; }
     d.appendChild(a);
   }
-  if (m.t) d.appendChild(document.createTextNode(m.t));
+  if (m.t) { const tx = document.createElement("span"); tx.className = "txt"; tx.textContent = m.t; d.appendChild(tx); }
   const t = document.createElement("span"); t.className = "time";
-  t.textContent = new Date(m.ts * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  t.textContent = timeText(m);
   d.appendChild(t);
-  d.onclick = ev => { if (m.id && !ev.target.closest("a,audio")) openSheet(m); };
   box.appendChild(d); box.scrollTop = box.scrollHeight;
 }
 
@@ -592,7 +612,15 @@ socket.on("deleted", d => {
     const el = box.querySelector('[data-id="' + d.id + '"]');
     if (el) el.remove();
   }
-  if (replyTo && replyTo.id === d.id) clearReply();
+  if ((replyTo && replyTo.id === d.id) || editing === d.id) clearReply();
+});
+socket.on("edited", d => {
+  if (d.room !== active) return;
+  const el = box.querySelector('[data-id="' + d.id + '"]');
+  if (!el || !el._m) return;
+  el._m.t = d.t; el._m.ed = 1;
+  const tx = el.querySelector(".txt"); if (tx) tx.textContent = d.t;
+  el.querySelector(".time").textContent = timeText(el._m);
 });
 socket.on("typing", d => {
   if (d.room !== active) return;
@@ -603,6 +631,11 @@ socket.on("typing", d => {
 $("form").addEventListener("submit", e => {
   e.preventDefault();
   const i = $("text"), text = i.value.trim();
+  if (editing) {
+    if (text) socket.emit("edit", {room: active, id: editing, text: text});
+    clearReply(); i.value = "";
+    return;
+  }
   if (text && active !== null) {
     socket.emit("send", {room: active, text: text, reply: replyTo ? replyTo.id : null});
     clearReply();
@@ -1061,6 +1094,33 @@ def on_delete(data):
     db.session.delete(row)
     db.session.commit()
     emit_to_room(rid, "deleted", {"room": rid, "id": mid})
+
+
+@socketio.on("edit")
+def on_edit(data):
+    user = current_user()
+    if not user:
+        disconnect()
+        return
+    rid = to_int((data or {}).get("room"))
+    mid = to_int((data or {}).get("id"))
+    text = str((data or {}).get("text", "")).strip()[:1000]
+    if not mid or not text or not is_member(rid, user.id):
+        return
+    row = db.session.get(ChatMessage, mid)
+    if not row or row.room_id != rid:
+        return
+    try:
+        m = json.loads(decrypt(row.blob))
+    except Exception:
+        return
+    if m.get("u") != user.username or not m.get("t"):  # تعديل رسائلك النصية فقط
+        return
+    m["t"] = text
+    m["ed"] = 1
+    row.blob = encrypt(json.dumps(m, ensure_ascii=False))
+    db.session.commit()
+    emit_to_room(rid, "edited", {"room": rid, "id": mid, "t": text})
 
 
 @socketio.on("typing")
